@@ -137,10 +137,15 @@ function App() {
   const providerLogos = { mtn, airtel, telecel }; // Added back
 
   const formatPhoneNumber = useCallback((phone) => {
-    if (phone.startsWith("0") && phone.length === 10)
-      return `233${phone.slice(1)}`;
-    if (phone.startsWith("233") && phone.length === 13) return phone;
-    return `233${phone}`;
+    let formatted = phone;
+    if (phone.startsWith("0") && phone.length === 10) {
+      formatted = `233${phone.slice(1)}`;
+    } else if (phone.startsWith("233") && phone.length === 12) {
+      formatted = phone;
+    } else {
+      formatted = `233${phone}`;
+    }
+    return formatted;
   }, []);
 
   const closeModal = () => {
@@ -454,19 +459,27 @@ function App() {
 
   const handleCheckData = async (e) => {
     e.preventDefault();
+
+    // Validate phone number (10 digits to match UI pattern)
     if (!/^\d{10}$/.test(dataPhoneNumber)) {
+      closeCheckDataModal();
       setErrorMessage("Please enter a valid 10-digit phone or MoMo number.");
       return;
     }
 
+    // Format phone number to match Firestore (e.g., "233537113751")
     const formattedPhone = formatPhoneNumber(dataPhoneNumber);
+
     try {
+      // Query data_approve_teller_transaction collection
       let q = query(
         collection(db, "approve_teller_transaction"),
         where("recipient_number", "==", formattedPhone)
       );
       let snapshot = await getDocs(q);
+      console.log(`[DEBUG] Recipient number query returned `);
 
+      // If no match, try subscriber_number
       if (snapshot.empty) {
         q = query(
           collection(db, "approve_teller_transaction"),
@@ -476,31 +489,33 @@ function App() {
       }
 
       if (snapshot.empty) {
-        setErrorMessage(`No data bundle found for ${dataPhoneNumber}`);
         closeCheckDataModal();
+        setErrorMessage(`No data bundle found for ${dataPhoneNumber}`);
         return;
       }
 
-      const data = snapshot.docs[0].data();
-      let message = "";
+      // Check the first matching document
+      const doc = snapshot.docs[0];
+      const data = doc.data();
 
-      switch (data.status) {
-        case "approved":
-          message = data.exported
-            ? `✅ Data ACTIVATED! ${data.desc}`
-            : `✅ Payment approved! ⏳ Data processing...`;
-          break;
-        case "declined":
-          message = `❌ Payment declined: ${data.reason || "Unknown reason"}`;
-          break;
-        default:
-          message = `Status: ${data.status}`;
+      let message = "";
+      if (data.status === "approved") {
+        if (data.exported === true) {
+          message =
+            "Data is being processed and will be delivered in 10 minutes.";
+        } else {
+          message = "Data not processed.";
+        }
+      } else if (data.status === "declined") {
+        message = `❌ Payment declined: ${data.reason || "Unknown reason"}`;
+      } else {
+        message = `Status: ${data.status}`;
       }
 
-      setErrorMessage(message);
       closeCheckDataModal();
+      setErrorMessage(message);
     } catch (error) {
-      console.error("Data check error:", error);
+      closeCheckDataModal();
       setErrorMessage(`Error checking status: ${error.message}`);
     }
   };
