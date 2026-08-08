@@ -1,179 +1,192 @@
-import React, {
-  useState,
-  useMemo,
-  useEffect,
-  useCallback,
-  useRef,
-} from "react";
-import { useNavigate } from "react-router-dom";
-import { motion } from "framer-motion";
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import Modal from "react-modal";
 import {
   FaWhatsapp,
   FaWifi,
   FaSearch,
-  FaUserShield,
   FaCheckCircle,
   FaSpinner,
   FaTimesCircle,
+  FaMobileAlt,
 } from "react-icons/fa";
-import { signInWithEmailAndPassword, onAuthStateChanged } from "firebase/auth";
-import { collection, query, where, getDocs } from "firebase/firestore";
-import { db, auth, functions } from "./Firebase";
+import {
+  collection,
+  query,
+  where,
+  orderBy,
+  getDocs,
+  doc,
+  onSnapshot,
+} from "firebase/firestore";
+import { db, functions } from "./Firebase";
 import { httpsCallable } from "firebase/functions";
 import "./App.css";
-import mtn from "./download.png";
-import airtel from "./airtel.png";
-import telecel from "./telecel.png";
+import mtnLogo from "./download.png";
+import airtelLogo from "./airtel.png";
+import telecelLogo from "./telecel.png";
 
 Modal.setAppElement("#root");
 
-const THETELLER_CONFIG = {
-  merchantId: "TTM-00009769",
-};
-
 const STATIC_CUSTOMER_EMAIL = "customeremail@gmail.com";
 
-const PAYMENT_NETWORKS = [
-  { value: "MTN", label: "MTN" },
-  { value: "ATL", label: "Airtel" },
-  { value: "VDF", label: "Telecel" },
+// Network keys match the `boom-bundles/{network}` documents in Firestore.
+const NETWORKS = [
+  { value: "mtn", label: "MTN", logo: mtnLogo },
+  { value: "tigo", label: "AirtelTigo", logo: airtelLogo },
+  { value: "telecel", label: "Telecel", logo: telecelLogo },
 ];
 
-const providersData = {
-  airtel: [
-    { gb: 1, price: 5.0 },
-    { gb: 2, price: 9.0 },
-    { gb: 3, price: 14.0 },
-    { gb: 4, price: 19.0 },
-    { gb: 5, price: 25.0 },
-    { gb: 6, price: 30.0 },
-    { gb: 7, price: 35.0 },
-    { gb: 8, price: 44.0 },
-    { gb: 10, price: 50.0 },
-    { gb: 12, price: 60.0 },
-    { gb: 15, price: 58.0 },
-    { gb: 20, price: 85.0 },
-    { gb: 25, price: 100.0 },
-    { gb: 30, price: 130.0 },
-    { gb: 40, price: 180.0 },
-    { gb: 50, price: 235.0 },
-    { gb: 100, price: 450.0 },
-  ],
-  telecel: [
-    { gb: 1, price: 5.0 },
-    { gb: 2, price: 9.0 },
-    { gb: 3, price: 14.0 },
-    { gb: 4, price: 19.0 },
-    { gb: 5, price: 25.0 },
-    { gb: 6, price: 30.0 },
-    { gb: 7, price: 35.0 },
-    { gb: 8, price: 44.0 },
-    { gb: 10, price: 50.0 },
-    { gb: 12, price: 60.0 },
-    { gb: 15, price: 58.0 },
-    { gb: 20, price: 85.0 },
-    { gb: 25, price: 100.0 },
-    { gb: 30, price: 130.0 },
-    { gb: 40, price: 180.0 },
-    { gb: 50, price: 235.0 },
-    { gb: 100, price: 450.0 },
-  ],
-  mtn: [
-    { gb: 1, price: 7.0 },
-    { gb: 2, price: 11.5 },
-    { gb: 3, price: 17.5 },
-    { gb: 4, price: 23.0 },
-    { gb: 5, price: 28.0 },
-    { gb: 6, price: 35.0 },
-    { gb: 8, price: 43.0 },
-    { gb: 10, price: 52.0 },
-    { gb: 15, price: 75.0 },
-    { gb: 20, price: 93.0 },
-    { gb: 25, price: 115.0 },
-    { gb: 30, price: 140.0 },
-    { gb: 40, price: 180.0 },
-    { gb: 50, price: 220.0 },
-  ],
+// The r-switch code the backend infers from the MoMo number, mapped back
+// to a friendly label for the "approve on your wallet" screen.
+const NETWORK_LABELS = {
+  MTN: "MTN",
+  VDF: "Telecel",
+  ATL: "AirtelTigo",
 };
 
+const PERIODS = [
+  { subcoll: "daily", label: "Daily" },
+  { subcoll: "weekly", label: "Weekly" },
+  { subcoll: "monthly", label: "Monthly" },
+];
+
+// Fetches every active bundle across daily/weekly/monthly for a network
+// from boom-bundles/{network}/{daily|weekly|monthly}, and flattens them
+// into a single price-sorted list, each tagged with its period.
+const loadNetworkBundles = async (network) => {
+  if (!["mtn", "tigo", "telecel"].includes(network)) {
+    console.error(`Unsupported network requested: ${network}`);
+    throw new Error(`Unsupported network: ${network}`);
+  }
+
+  const networkRef = doc(db, "bundles", network);
+  const all = [];
+
+  for (const { subcoll, label } of PERIODS) {
+    const q = query(
+      collection(networkRef, subcoll),
+      where("active", "==", true),
+      orderBy("price", "asc"),
+    );
+    const snap = await getDocs(q);
+
+    console.log(
+      `[Bundles] ${network}/${subcoll} \u2192 found ${snap.size} active plans`,
+    );
+
+    snap.docs.forEach((d) => {
+      all.push({ id: d.id, period: label, ...d.data() });
+    });
+  }
+
+  all.sort((a, b) => a.price - b.price);
+
+  console.log(`[Bundles] ${network} total active plans: ${all.length}`);
+
+  return all;
+};
+
+// A bundle doc is assumed to look like { size: "1GB", price: 5, validity?: "24 hours" }.
+// Adjust this if your field names differ.
+const bundleLabel = (bundle) => {
+  const size = bundle.size || bundle.volume || bundle.name || bundle.id;
+  const price = Number(bundle.price).toFixed(2);
+  return `${size} \u2013 GHS ${price} (${bundle.period})`;
+};
+
+// Normalizes a local number (0XXXXXXXXX) or already-formatted 233XXXXXXXXX
+// number into the 233XXXXXXXXX format the backend expects.
+const formatPhoneNumber = (phone) => {
+  let formatted = phone;
+  if (phone.startsWith("0") && phone.length === 10) {
+    formatted = `233${phone.slice(1)}`;
+  } else if (phone.startsWith("233") && phone.length === 12) {
+    formatted = phone;
+  } else {
+    formatted = `233${phone}`;
+  }
+  return formatted;
+};
+
+const generateTransactionId = () => {
+  const array = new Uint32Array(1);
+  crypto.getRandomValues(array);
+  return array[0].toString().padStart(12, "0").slice(0, 12);
+};
+
+const initiatePayment = httpsCallable(functions, "initiatePayment");
+
 function App() {
-  const navigate = useNavigate();
-  const [selectedProvider, setSelectedProvider] = useState("airtel");
-  const [selectedBundleSize, setSelectedBundleSize] = useState("1");
+  const [selectedNetwork, setSelectedNetwork] = useState("mtn");
+  const [bundles, setBundles] = useState([]);
+  const [bundlesLoading, setBundlesLoading] = useState(true);
+  const [bundlesError, setBundlesError] = useState("");
+  const [selectedBundleId, setSelectedBundleId] = useState("");
+
   const [recipientPhoneNumber, setRecipientPhoneNumber] = useState("");
   const [momoNumber, setMomoNumber] = useState("");
-  const [paymentNetwork, setPaymentNetwork] = useState("ATL");
   const [modalIsOpen, setModalIsOpen] = useState(false);
   const [purchaseDetails, setPurchaseDetails] = useState(null);
   const [isPaymentLoading, setIsPaymentLoading] = useState(false);
   const [checkDataModalOpen, setCheckDataModalOpen] = useState(false);
-  const [agentPortalModalOpen, setAgentPortalModalOpen] = useState(false);
   const [dataPhoneNumber, setDataPhoneNumber] = useState("");
-  const [agentEmail, setAgentEmail] = useState("");
-  const [agentPassword, setAgentPassword] = useState("");
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [agentFullName, setAgentFullName] = useState("");
-  const [agentPhone, setAgentPhone] = useState("");
-  const [agentMomoNumber, setAgentMomoNumber] = useState("");
-  const [agentPaymentNetwork, setAgentPaymentNetwork] = useState("ATL");
-  const [agentSignUpEmail, setAgentSignUpEmail] = useState("");
-  const [signUpUsername, setSignUpUsername] = useState("");
-  const [signUpPassword, setSignUpPassword] = useState("");
-  const [agentSignUpDetails, setAgentSignUpDetails] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
-  const [signupError, setSignupError] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [paymentStatus, setPaymentStatus] = useState(null);
-  const [countdown, setCountdown] = useState(null);
-  const [isAgentSignup, setIsAgentSignup] = useState(false); // Added back
-  const statusCache = useRef(new Map());
-  const timeoutRef = useRef(null);
-  const initiateThetellerPayment = useCallback(
-    httpsCallable(functions, "initiateThetellerPayment"),
-    []
-  );
+  const [detectedNetwork, setDetectedNetwork] = useState(null);
+  const unsubscribeRef = useRef(null);
 
-  const providerLogos = { mtn, airtel, telecel }; // Added back
+  // Load every active bundle for the selected network as soon as the page
+  // loads or the network changes - no daily/weekly/monthly picker needed.
+  useEffect(() => {
+    let cancelled = false;
+    setBundlesLoading(true);
+    setBundlesError("");
+    setSelectedBundleId("");
 
-  const formatPhoneNumber = useCallback((phone) => {
-    let formatted = phone;
-    if (phone.startsWith("0") && phone.length === 10) {
-      formatted = `233${phone.slice(1)}`;
-    } else if (phone.startsWith("233") && phone.length === 12) {
-      formatted = phone;
-    } else {
-      formatted = `233${phone}`;
+    loadNetworkBundles(selectedNetwork)
+      .then((result) => {
+        if (cancelled) return;
+        setBundles(result);
+        if (result.length > 0) setSelectedBundleId(result[0].id);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Failed to load bundles:", error);
+        setBundlesError(
+          "Couldn't load bundles for this network. Please try again.",
+        );
+        setBundles([]);
+      })
+      .finally(() => {
+        if (!cancelled) setBundlesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNetwork]);
+
+  const getSelectedBundle = useMemo(() => {
+    return bundles.find((b) => b.id === selectedBundleId);
+  }, [bundles, selectedBundleId]);
+
+  const stopListening = () => {
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
     }
-    return formatted;
-  }, []);
+  };
 
   const closeModal = () => {
     setModalIsOpen(false);
     setPurchaseDetails(null);
-    setAgentSignUpDetails(null);
     setPaymentStatus(null);
-    setErrorMessage("");
-    setCountdown(null);
-    setIsAgentSignup(false);
-    statusCache.current.clear();
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    if (!currentUser) {
-      setRecipientPhoneNumber("");
-      setMomoNumber("");
-      setPaymentNetwork("ATL");
-      setSelectedProvider("airtel");
-      setSelectedBundleSize("1");
-    }
+    setDetectedNetwork(null);
+    stopListening();
+    setRecipientPhoneNumber("");
+    setMomoNumber("");
   };
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, setCurrentUser);
-    return () => unsubscribe();
-  }, []);
 
   useEffect(() => {
     if (errorMessage) {
@@ -182,99 +195,28 @@ function App() {
     }
   }, [errorMessage]);
 
-  useEffect(() => {
-    if (countdown === null) return;
-    if (countdown <= 0) {
-      setCountdown(null);
-      return;
-    }
-    const timer = setInterval(() => {
-      setCountdown((prev) => prev - 1);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [countdown]);
+  useEffect(() => () => stopListening(), []);
 
-  const checkPaymentStatus = useCallback(async () => {
-    const transactionId =
-      purchaseDetails?.transid || agentSignUpDetails?.transid;
-    if (!transactionId) {
-      setErrorMessage("No transaction ID available.");
-      closeModal();
-      return;
-    }
-
-    if (statusCache.current.has(transactionId)) {
-      const cachedStatus = statusCache.current.get(transactionId);
-      console.log(`Using cached status for ${transactionId}:`, cachedStatus);
-      setPaymentStatus(cachedStatus.final_status);
-      return;
-    }
-
-    try {
-      console.log(`Checking status for transaction ${transactionId}`);
-      const result = await initiateThetellerPayment({
-        transaction_id: transactionId,
-        isCallback: true,
-      });
-
-      const { final_status, code, reason } = result.data;
-      console.log(`Received status for ${transactionId}:`, {
-        final_status,
-        code,
-        reason,
-      });
-
-      statusCache.current.set(transactionId, { final_status, code, reason });
-      setPaymentStatus(final_status);
-
-      if (final_status === "approved") {
-        if (isAgentSignup && agentSignUpDetails) {
-          try {
-            await signInWithEmailAndPassword(
-              auth,
-              agentSignUpDetails.email,
-              agentSignUpDetails.password
-            );
-            setErrorMessage(
-              `🎉 Welcome ${agentSignUpDetails.fullName}! Agent account created & logged in!`
-            );
-            closeModal();
-            navigate("/agent-portal");
-            return;
-          } catch (loginError) {
-            setErrorMessage(
-              `Payment successful! Please login with your credentials.`
-            );
-          }
+  // Live-listens for the transaction doc going from pending/sent to
+  // approved/declined, updated by the onlineghCallback Cloud Function.
+  const listenForPaymentResult = (transactionId) => {
+    stopListening();
+    const unsub = onSnapshot(doc(db, "transactions", transactionId), (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.rSwitch) setDetectedNetwork(data.rSwitch);
+      if (data.status === "approved" || data.status === "declined") {
+        setPaymentStatus(data.status);
+        if (data.status === "declined") {
+          setErrorMessage(
+            `Payment declined: ${data.gatewayReason || "Unknown reason"}`,
+          );
         }
-      } else if (final_status === "declined") {
-        setErrorMessage(`Payment declined: ${reason || "Unknown reason"}`);
+        stopListening();
       }
-    } catch (error) {
-      console.error(`Status check error for ${transactionId}:`, error);
-      setErrorMessage(`Failed to check payment status: ${error.message}`);
-    }
-  }, [
-    purchaseDetails,
-    agentSignUpDetails,
-    currentUser,
-    formatPhoneNumber,
-    initiateThetellerPayment,
-    isAgentSignup,
-    navigate,
-  ]);
-
-  const generateTransactionId = useCallback(() => {
-    const array = new Uint32Array(1);
-    crypto.getRandomValues(array);
-    return array[0].toString().padStart(12, "0").slice(0, 12);
-  }, []);
-
-  const getSelectedBundle = useMemo(() => {
-    return providersData[selectedProvider]?.find(
-      (bundle) => bundle.gb === Number(selectedBundleSize)
-    );
-  }, [selectedProvider, selectedBundleSize]);
+    });
+    unsubscribeRef.current = unsub;
+  };
 
   const handlePurchase = async (e) => {
     e.preventDefault();
@@ -284,152 +226,55 @@ function App() {
       !/^\d{10}$/.test(recipientPhoneNumber) ||
       !/^\d{10}$/.test(momoNumber)
     ) {
-      setErrorMessage("Please enter valid 10-digit phone and MoMo numbers.");
+      setErrorMessage(
+        "Please select a bundle and enter valid 10-digit phone and MoMo numbers.",
+      );
       return;
     }
 
     setIsPaymentLoading(true);
-    setIsAgentSignup(false);
-    statusCache.current.clear();
     const transactionId = generateTransactionId();
-    const amountInPesewas = (getSelectedBundle.price * 100).toFixed(0);
+    const bundleSizeLabel =
+      getSelectedBundle.size ||
+      getSelectedBundle.volume ||
+      getSelectedBundle.id;
 
     const newPurchaseDetails = {
-      provider: selectedProvider.toUpperCase(),
-      gb: getSelectedBundle.gb,
+      network: selectedNetwork.toUpperCase(),
+      bundle: bundleSizeLabel,
+      period: getSelectedBundle.period,
       price: getSelectedBundle.price,
       number: recipientPhoneNumber,
       momoNumber,
-      paymentNetwork,
       transid: transactionId,
     };
 
     setPurchaseDetails(newPurchaseDetails);
     setPaymentStatus(null);
-    setCountdown(30);
+    setDetectedNetwork(null);
     setModalIsOpen(true);
 
     try {
-      console.log("Initiating payment:", {
-        transactionId,
-        recipientPhoneNumber,
-      });
-      const result = await initiateThetellerPayment({
-        merchant_id: THETELLER_CONFIG.merchantId,
+      const result = await initiatePayment({
         transaction_id: transactionId,
-        desc: `${
-          getSelectedBundle.gb
-        }GB ${selectedProvider.toUpperCase()} Data Bundle`,
-        amount: amountInPesewas,
+        desc: `${bundleSizeLabel} ${selectedNetwork.toUpperCase()} ${getSelectedBundle.period} Data Bundle`,
+        amount: getSelectedBundle.price,
         subscriber_number: formatPhoneNumber(momoNumber),
-        recipient_number: recipientPhoneNumber,
-        r_switch: paymentNetwork,
+        recipient_number: formatPhoneNumber(recipientPhoneNumber),
+        provider: selectedNetwork.toUpperCase(),
+        gb: bundleSizeLabel,
+        bundle_id: getSelectedBundle.id,
+        period: getSelectedBundle.period,
         email: STATIC_CUSTOMER_EMAIL,
-        isAgentSignup: false,
       });
 
-      setPaymentStatus(result.data.status);
-      setErrorMessage(
-        `📱 Transaction initiated for MoMo number ${momoNumber}!`
-      );
-
-      timeoutRef.current = setTimeout(() => {
-        checkPaymentStatus();
-      }, 35000);
+      if (result.data.network) setDetectedNetwork(result.data.network);
+      setPaymentStatus("sent");
+      listenForPaymentResult(transactionId);
     } catch (error) {
       console.error("Payment initiation error:", error);
-      setErrorMessage( `Payment failed/Declined: Try Again`);
+      setErrorMessage(error.message || "Payment failed. Please try again.");
       setPurchaseDetails(null);
-      setCountdown(null);
-      setModalIsOpen(false);
-    } finally {
-      setIsPaymentLoading(false);
-    }
-  };
-
-  const handleAgentSignUpPayment = async (e) => {
-    e.preventDefault();
-
-    if (
-      !agentFullName ||
-      !agentPhone ||
-      !agentMomoNumber ||
-      !agentSignUpEmail ||
-      !signUpUsername ||
-      !signUpPassword ||
-      !agentPaymentNetwork
-    ) {
-      setSignupError("Please fill all fields.");
-      return;
-    }
-
-    if (!/^\d{10}$/.test(agentPhone) || !/^\d{10}$/.test(agentMomoNumber)) {
-      setSignupError("Please enter valid 10-digit phone and MoMo numbers.");
-      return;
-    }
-
-    if (
-      !agentSignUpEmail.match(
-        /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/
-      )
-    ) {
-      setSignupError("Please enter a valid email address.");
-      return;
-    }
-
-    setIsPaymentLoading(true);
-    setSignupError("");
-    setIsAgentSignup(true);
-    statusCache.current.clear();
-    const transactionId = generateTransactionId();
-
-    const agentDetails = {
-      fullName: agentFullName,
-      phone: agentPhone,
-      momoNumber: agentMomoNumber,
-      paymentNetwork: agentPaymentNetwork,
-      email: agentSignUpEmail,
-      username: signUpUsername,
-      password: signUpPassword,
-      transid: transactionId,
-    };
-
-    setAgentSignUpDetails(agentDetails);
-    setPaymentStatus(null);
-    setCountdown(30);
-    setModalIsOpen(true);
-    setAgentPortalModalOpen(false);
-
-    try {
-      console.log("Initiating agent signup payment:", { transactionId });
-      const result = await initiateThetellerPayment({
-        merchant_id: THETELLER_CONFIG.merchantId,
-        transaction_id: transactionId,
-        desc: JSON.stringify(agentDetails),
-        amount: (50.0 * 100).toFixed(0),
-        subscriber_number: formatPhoneNumber(agentMomoNumber),
-        r_switch: agentPaymentNetwork,
-        email: STATIC_CUSTOMER_EMAIL,
-        isAgentSignup: true,
-      });
-
-      setPaymentStatus(result.data.status);
-      setErrorMessage(
-        `📱 Agent registration payment initiated for MoMo number ${agentMomoNumber}!`
-      );
-
-      timeoutRef.current = setTimeout(() => {
-        checkPaymentStatus();
-      }, 30000);
-    } catch (error) {
-      console.error("Agent signup payment error:", error);
-      setSignupError(
-        error.code === "invalid-argument"
-          ? error.message
-          : `Payment failed: ${error.message}`
-      );
-      setAgentSignUpDetails(null);
-      setCountdown(null);
       setModalIsOpen(false);
     } finally {
       setIsPaymentLoading(false);
@@ -442,48 +287,28 @@ function App() {
     setErrorMessage("");
   };
 
-  const closeAgentPortalModal = () => {
-    setAgentPortalModalOpen(false);
-    setAgentEmail("");
-    setAgentPassword("");
-    setIsSignUp(false);
-    setSignupError("");
-    setAgentFullName("");
-    setAgentPhone("");
-    setAgentMomoNumber("");
-    setAgentPaymentNetwork("ATL");
-    setAgentSignUpEmail("");
-    setSignUpUsername("");
-    setSignUpPassword("");
-  };
-
   const handleCheckData = async (e) => {
     e.preventDefault();
 
-    // Validate phone number (10 digits to match UI pattern)
     if (!/^\d{10}$/.test(dataPhoneNumber)) {
       closeCheckDataModal();
       setErrorMessage("Please enter a valid 10-digit phone or MoMo number.");
       return;
     }
 
-    // Format phone number to match Firestore (e.g., "233537113751")
     const formattedPhone = formatPhoneNumber(dataPhoneNumber);
 
     try {
-      // Query data_approve_teller_transaction collection
       let q = query(
-        collection(db, "approve_teller_transaction"),
-        where("recipient_number", "==", formattedPhone)
+        collection(db, "transactions"),
+        where("recipientNumber", "==", formattedPhone),
       );
       let snapshot = await getDocs(q);
-      console.log(`[DEBUG] Recipient number query returned `);
 
-      // If no match, try subscriber_number
       if (snapshot.empty) {
         q = query(
-          collection(db, "approve_teller_transaction"),
-          where("subscriber_number", "==", formattedPhone)
+          collection(db, "transactions"),
+          where("subscriberNumber", "==", formattedPhone),
         );
         snapshot = await getDocs(q);
       }
@@ -494,20 +319,17 @@ function App() {
         return;
       }
 
-      // Check the first matching document
-      const doc = snapshot.docs[0];
-      const data = doc.data();
+      const data = snapshot.docs[0].data();
 
       let message = "";
       if (data.status === "approved") {
-        if (data.exported === true) {
-          message =
-            "Data is being processed and will be delivered in 10 minutes.";
-        } else {
-          message = "Data not processed.";
-        }
+        message = data.exported
+          ? "Your data has been delivered."
+          : "Payment confirmed - your data is being processed and will be delivered shortly.";
       } else if (data.status === "declined") {
-        message = `❌ Payment declined: ${data.reason || "Unknown reason"}`;
+        message = `Payment declined: ${data.gatewayReason || "Unknown reason"}`;
+      } else if (data.status === "sent") {
+        message = "Payment is awaiting your approval on your MoMo wallet.";
       } else {
         message = `Status: ${data.status}`;
       }
@@ -520,31 +342,26 @@ function App() {
     }
   };
 
-  const handleAgentLogin = async (e) => {
-    e.preventDefault();
-    try {
-      await signInWithEmailAndPassword(auth, agentEmail, agentPassword);
-      setErrorMessage(`Logged in as agent with email ${agentEmail}!`);
-      closeAgentPortalModal();
-      navigate("/agent-portal");
-    } catch (error) {
-      console.error("Agent login error:", error);
-      setErrorMessage(`Login failed: ${error.message}`);
-    }
-  };
+  const network = detectedNetwork
+    ? { label: NETWORK_LABELS[detectedNetwork] }
+    : null;
 
   return (
     <div className="app">
-      {errorMessage && (
-        <motion.div
-          className="global-error"
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          {errorMessage}
-        </motion.div>
-      )}
+      <AnimatePresence>
+        {errorMessage && (
+          <motion.div
+            className="global-error"
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            transition={{ duration: 0.3 }}
+          >
+            {errorMessage}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <header className="header">
         <motion.div
           className="title-with-icon"
@@ -559,8 +376,7 @@ function App() {
           animate={{ opacity: 1 }}
           className="subtitle"
         >
-          Easy & Affordable Data Bundle Purchase
-          {currentUser && <span> | Welcome, {currentUser.email} (Agent)</span>}
+          Easy & affordable data bundles, delivered fast
         </motion.p>
       </header>
 
@@ -569,34 +385,19 @@ function App() {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
       >
-        <div className="action-buttons-container">
-          <motion.button
-            className="action-button check-data-btn"
-            onClick={() => setCheckDataModalOpen(true)}
-            whileHover={{ scale: 1.05 }}
-          >
-            <FaSearch /> Check Data Status
-          </motion.button>
-          <motion.button
-            className="action-button agent-portal-btn"
-            onClick={() => setAgentPortalModalOpen(true)}
-            whileHover={{ scale: 1.05 }}
-          >
-            <FaUserShield /> Agent Portal
-          </motion.button>
-        </div>
+        
       </motion.section>
 
       <motion.section className="provider-logos-section">
         <h3>Supported Networks</h3>
         <div className="provider-logos-container">
-          {Object.keys(providerLogos).map((provider) => (
+          {NETWORKS.map((n) => (
             <motion.img
-              key={provider}
-              src={providerLogos[provider]}
+              key={n.value}
+              src={n.logo}
               className="provider-logo-img"
-              alt={provider}
-              whileHover={{ scale: 1.1 }}
+              alt={n.label}
+              whileHover={{ scale: 1.08 }}
             />
           ))}
         </div>
@@ -611,31 +412,45 @@ function App() {
           <div className="form-group">
             <label>Data Network:</label>
             <select
-              value={selectedProvider}
-              onChange={(e) => setSelectedProvider(e.target.value)}
+              value={selectedNetwork}
+              onChange={(e) => setSelectedNetwork(e.target.value)}
               required
             >
-              {Object.keys(providersData).map((p) => (
-                <option key={p} value={p}>
-                  {p.toUpperCase()}
+              {NETWORKS.map((n) => (
+                <option key={n.value} value={n.value}>
+                  {n.label}
                 </option>
               ))}
             </select>
           </div>
+
           <div className="form-group">
             <label>Bundle:</label>
-            <select
-              value={selectedBundleSize}
-              onChange={(e) => setSelectedBundleSize(e.target.value)}
-              required
-            >
-              {providersData[selectedProvider]?.map((b) => (
-                <option key={b.gb} value={b.gb}>
-                  {b.gb}GB (GHS {b.price})
-                </option>
-              ))}
-            </select>
+            {bundlesLoading ? (
+              <p className="form-hint">
+                <FaSpinner className="spin" /> Loading bundles...
+              </p>
+            ) : bundlesError ? (
+              <span className="form-error">{bundlesError}</span>
+            ) : bundles.length === 0 ? (
+              <p className="form-hint">
+                No active bundles for this network right now.
+              </p>
+            ) : (
+              <select
+                value={selectedBundleId}
+                onChange={(e) => setSelectedBundleId(e.target.value)}
+                required
+              >
+                {bundles.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {bundleLabel(b)}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
+
           <div className="form-group">
             <label>Recipient Phone Number:</label>
             <input
@@ -653,6 +468,7 @@ function App() {
               </span>
             )}
           </div>
+
           <div className="form-group">
             <label>MoMo Number:</label>
             <input
@@ -664,40 +480,32 @@ function App() {
               required
               aria-describedby="momo-error"
             />
+            <span className="form-hint">
+              We'll automatically detect your network from this number.
+            </span>
             {momoNumber && !/^\d{10}$/.test(momoNumber) && (
               <span className="form-error" id="momo-error">
                 Please enter a valid 10-digit MoMo number.
               </span>
             )}
           </div>
-          <div className="form-group">
-            <label>Payment Network:</label>
-            <select
-              value={paymentNetwork}
-              onChange={(e) => setPaymentNetwork(e.target.value)}
-              required
-            >
-              {PAYMENT_NETWORKS.map((network) => (
-                <option key={network.value} value={network.value}>
-                  {network.label}
-                </option>
-              ))}
-            </select>
-          </div>
+
           <motion.button
             type="submit"
             disabled={isPaymentLoading || !getSelectedBundle}
             className="submit-button"
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            aria-label={`Purchase ${getSelectedBundle?.gb}GB bundle for GHS ${getSelectedBundle?.price}`}
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
+            aria-label={`Purchase ${getSelectedBundle?.size || ""} bundle for GHS ${getSelectedBundle?.price}`}
           >
             {isPaymentLoading ? (
               <>
-                <FaSpinner className="spin" /> Processing...
+                <FaSpinner className="spin" /> Sending request...
               </>
+            ) : getSelectedBundle ? (
+              `Pay GHS ${getSelectedBundle.price}`
             ) : (
-              `Pay GHS ${getSelectedBundle?.price}`
+              "Select a bundle"
             )}
           </motion.button>
         </form>
@@ -723,7 +531,7 @@ function App() {
           target="_blank"
           rel="noopener noreferrer"
         >
-          <FaWhatsapp size={24} /> Join WhatsApp Group
+          <FaWhatsapp size={22} /> Join WhatsApp Group
         </motion.a>
       </motion.section>
 
@@ -732,7 +540,7 @@ function App() {
         className="whatsapp-float"
         whileHover={{ scale: 1.1 }}
       >
-        <FaWhatsapp size={30} />
+        <FaWhatsapp size={28} />
       </motion.a>
 
       <Modal
@@ -750,82 +558,63 @@ function App() {
         >
           {paymentStatus === "approved" ? (
             <>
-              <FaCheckCircle size={50} className="success-icon" />
-              <h2 id="pin-modal-title">🎉 Payment Successful!</h2>
-              <p>
-                {isAgentSignup
-                  ? "Agent registration completed!"
-                  : `${purchaseDetails?.gb}GB bundle purchased!`}
-              </p>
-              <p>
-                {isAgentSignup
-                  ? "Logging you in..."
-                  : "Data will be processed shortly."}
-              </p>
+              <FaCheckCircle size={48} className="success-icon" />
+              <h2 id="pin-modal-title">Payment Successful!</h2>
+              <p>{purchaseDetails?.bundle} bundle purchased!</p>
+              <p>Your data will be processed shortly.</p>
               <motion.button
                 onClick={closeModal}
                 className="close-modal-button"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
               >
-                {isAgentSignup ? "Redirecting..." : "Close"}
+                Close
               </motion.button>
             </>
           ) : paymentStatus === "declined" ? (
             <>
-              <FaTimesCircle size={50} className="error-icon" />
-              <h2 id="pin-modal-title">❌ Payment Declined</h2>
+              <FaTimesCircle size={48} className="error-icon" />
+              <h2 id="pin-modal-title">Payment Declined</h2>
               <p>Please try again or contact support.</p>
               <motion.button
                 onClick={closeModal}
                 className="close-modal-button"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
               >
                 Close
               </motion.button>
             </>
           ) : (
             <>
-              <h2 id="pin-modal-title">📱 Processing Payment</h2>
-              <p>
-                <strong>Sent to MoMo Number:</strong>{" "}
-                {purchaseDetails?.momoNumber || agentSignUpDetails?.momoNumber}
+              <FaMobileAlt size={40} className="pending-icon" />
+              <h2 id="pin-modal-title">Approve on Your MoMo Wallet</h2>
+              <p className="pin-lead">
+                A payment request has been sent to{" "}
+                <strong>{purchaseDetails?.momoNumber}</strong>
+                {network ? ` (${network.label})` : ""}.
               </p>
               <div className="pin-instructions">
                 <ol>
-                  <li>Check SMS on your phone</li>
+                  <li>Check your phone for the prompt or SMS</li>
                   <li>Enter your Mobile Money PIN</li>
-                  <li>Approve payment</li>
+                  <li>Approve the payment to complete your purchase</li>
                 </ol>
               </div>
-              <p>
+              <p className="pin-summary">
                 <strong>
-                  {isAgentSignup
-                    ? "Agent Registration (GHS 50)"
-                    : `${purchaseDetails?.gb}GB ${purchaseDetails?.provider}`}
+                  {purchaseDetails?.bundle} {purchaseDetails?.network} (
+                  {purchaseDetails?.period}) - GHS {purchaseDetails?.price}
                 </strong>
               </p>
               <p className="timer">
-                {countdown !== null
-                  ? `Checking in ${countdown}s...`
-                  : "Checking status..."}
+                <FaSpinner className="spin" /> Waiting for your approval...
               </p>
-              <motion.button
-                onClick={checkPaymentStatus}
-                className="check-btn"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                aria-label="Check payment status"
-                disabled={countdown !== null || paymentStatus}
-              >
-                <FaSpinner className="spin" /> Check Now
-              </motion.button>
               <motion.button
                 onClick={closeModal}
                 className="close-modal-button secondary"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
                 aria-label="Cancel payment"
               >
                 Cancel
@@ -867,8 +656,8 @@ function App() {
             <motion.button
               type="submit"
               className="submit-button"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.97 }}
             >
               Check
             </motion.button>
@@ -876,191 +665,8 @@ function App() {
           <motion.button
             onClick={closeCheckDataModal}
             className="close-modal-button secondary"
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-          >
-            Cancel
-          </motion.button>
-        </div>
-      </Modal>
-
-      <Modal
-        isOpen={agentPortalModalOpen}
-        onRequestClose={closeAgentPortalModal}
-        className="modal"
-        overlayClassName="overlay"
-        aria-labelledby="agent-portal-modal-title"
-      >
-        <div className="modal-content">
-          <h2 id="agent-portal-modal-title">
-            <FaUserShield /> Agent Portal
-          </h2>
-          <div className="toggle-buttons">
-            <button
-              type="button"
-              className={`toggle-btn ${!isSignUp ? "active" : ""}`}
-              onClick={() => setIsSignUp(false)}
-            >
-              Login
-            </button>
-            <button
-              type="button"
-              className={`toggle-btn ${isSignUp ? "active" : ""}`}
-              onClick={() => setIsSignUp(true)}
-            >
-              Sign Up
-            </button>
-          </div>
-
-          {isSignUp ? (
-            <form onSubmit={handleAgentSignUpPayment} className="simple-form">
-              <p>
-                <strong>Step 1:</strong> Pay GHS 50 → <strong>Step 2:</strong>{" "}
-                Account auto-created!
-              </p>
-              {signupError && (
-                <p className="error-message" style={{ color: "red" }}>
-                  {signupError}
-                </p>
-              )}
-              <div className="form-group">
-                <label>Full Name:</label>
-                <input
-                  type="text"
-                  value={agentFullName}
-                  onChange={(e) => setAgentFullName(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>Contact Phone Number:</label>
-                <input
-                  type="tel"
-                  value={agentPhone}
-                  onChange={(e) => setAgentPhone(e.target.value)}
-                  pattern="[0-9]{10}"
-                  placeholder="0541234567"
-                  required
-                  aria-describedby="agent-phone-error"
-                />
-                {agentPhone && !/^\d{10}$/.test(agentPhone) && (
-                  <span className="form-error" id="agent-phone-error">
-                    Please enter a valid 10-digit phone number.
-                  </span>
-                )}
-              </div>
-              <div className="form-group">
-                <label>MoMo Number:</label>
-                <input
-                  type="tel"
-                  value={agentMomoNumber}
-                  onChange={(e) => setAgentMomoNumber(e.target.value)}
-                  pattern="[0-9]{10}"
-                  placeholder="0541234567"
-                  required
-                  aria-describedby="agent-momo-error"
-                />
-                {agentMomoNumber && !/^\d{10}$/.test(agentMomoNumber) && (
-                  <span className="form-error" id="agent-momo-error">
-                    Please enter a valid 10-digit MoMo number.
-                  </span>
-                )}
-              </div>
-              <div className="form-group">
-                <label>Payment Network:</label>
-                <select
-                  value={agentPaymentNetwork}
-                  onChange={(e) => setAgentPaymentNetwork(e.target.value)}
-                  required
-                >
-                  {PAYMENT_NETWORKS.map((network) => (
-                    <option key={network.value} value={network.value}>
-                      {network.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Email:</label>
-                <input
-                  type="email"
-                  value={agentSignUpEmail}
-                  onChange={(e) => setAgentSignUpEmail(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>Username:</label>
-                <input
-                  type="text"
-                  value={signUpUsername}
-                  onChange={(e) => setSignUpUsername(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>Password:</label>
-                <input
-                  type="password"
-                  value={signUpPassword}
-                  onChange={(e) => setSignUpPassword(e.target.value)}
-                  required
-                />
-              </div>
-              <motion.button
-                type="submit"
-                disabled={isPaymentLoading}
-                className="submit-button"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                aria-label="Pay GHS 50 and register as agent"
-              >
-                {isPaymentLoading ? (
-                  <>
-                    <FaSpinner className="spin" /> Processing...
-                  </>
-                ) : (
-                  "Pay GHS 50 & Register"
-                )}
-              </motion.button>
-            </form>
-          ) : (
-            <form onSubmit={handleAgentLogin} className="simple-form">
-              <div className="form-group">
-                <label>Email:</label>
-                <input
-                  type="email"
-                  value={agentEmail}
-                  onChange={(e) => setAgentEmail(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>Password:</label>
-                <input
-                  type="password"
-                  value={agentPassword}
-                  onChange={(e) => setAgentPassword(e.target.value)}
-                  required
-                />
-              </div>
-              <motion.button
-                type="submit"
-                className="submit-button"
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                aria-label="Login to agent portal"
-              >
-                Login
-              </motion.button>
-            </form>
-          )}
-          <motion.button
-            onClick={closeAgentPortalModal}
-            className="close-modal-button secondary"
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            aria-label="Close agent portal modal"
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.97 }}
           >
             Cancel
           </motion.button>
