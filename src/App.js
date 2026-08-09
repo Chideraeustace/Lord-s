@@ -92,7 +92,7 @@ const loadNetworkBundles = async (network) => {
 const bundleLabel = (bundle) => {
   const size = bundle.size || bundle.volume || bundle.name || bundle.id;
   const price = Number(bundle.price).toFixed(2);
-  return `${size} \u2013 GHS ${price} (${bundle.period})`;
+  return `${size} \u2013 GHS ${price}`;
 };
 
 // Normalizes a local number (0XXXXXXXXX) or already-formatted 233XXXXXXXXX
